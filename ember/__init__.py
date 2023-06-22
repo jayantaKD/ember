@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-
+import gc
 import os
 import json
 import tqdm
@@ -52,6 +52,7 @@ def vectorize_subset(X_path, y_path, raw_feature_paths, extractor, nrows):
     X = np.memmap(X_path, dtype=np.float32, mode="w+", shape=(nrows, extractor.dim))
     y = np.memmap(y_path, dtype=np.float32, mode="w+", shape=nrows)
     del X, y
+    gc.collect()
 
     # Distribute the vectorization work
     pool = multiprocessing.Pool()
@@ -61,7 +62,7 @@ def vectorize_subset(X_path, y_path, raw_feature_paths, extractor, nrows):
         pass
 
 
-def create_vectorized_features(data_dir, feature_version=2):
+def create_vectorized_features(data_dir, feature_version=2, noFiles=6):
     """
     Create feature vectors from raw features and write them to disk
     """
@@ -70,7 +71,10 @@ def create_vectorized_features(data_dir, feature_version=2):
     print("Vectorizing training set")
     X_path = os.path.join(data_dir, "X_train.dat")
     y_path = os.path.join(data_dir, "y_train.dat")
-    raw_feature_paths = [os.path.join(data_dir, "train_features_{}.jsonl".format(i)) for i in range(6)]
+
+
+    raw_feature_paths = [os.path.join(data_dir, "train_features_{}.jsonl".format(i)) for i in range(noFiles)]
+
     nrows = sum([1 for fp in raw_feature_paths for line in open(fp)])
     vectorize_subset(X_path, y_path, raw_feature_paths, extractor, nrows)
 
@@ -132,7 +136,7 @@ def create_metadata(data_dir):
     """
     pool = multiprocessing.Pool()
 
-    train_feature_paths = [os.path.join(data_dir, "train_features_{}.jsonl".format(i)) for i in range(6)]
+    train_feature_paths = [os.path.join(data_dir, "train_features_{}.jsonl".format(i)) for i in range(1)]
     train_records = list(pool.imap(read_metadata_record, raw_feature_iterator(train_feature_paths)))
 
     metadata_keys = ["sha256", "appeared", "label", "avclass"]
@@ -204,7 +208,7 @@ def optimize_model(data_dir):
     return grid.best_params_
 
 
-def train_model(data_dir, params={}, feature_version=2):
+def train_model(data_dir, params={}, feature_version=2, init_model=None):
     """
     Train the LightGBM model from the EMBER dataset from the vectorized features
     """
@@ -219,8 +223,14 @@ def train_model(data_dir, params={}, feature_version=2):
 
     # Train
     lgbm_dataset = lgb.Dataset(X_train[train_rows], y_train[train_rows])
-    lgbm_model = lgb.train(params, lgbm_dataset)
 
+    if init_model is None:
+        lgbm_model = lgb.train(params, lgbm_dataset)
+    else:
+        lgbm_model = lgb.train(params, lgbm_dataset, init_model=init_model)
+
+    del X_train, y_train
+    gc.collect()
     return lgbm_model
 
 
@@ -231,3 +241,21 @@ def predict_sample(lgbm_model, file_data, feature_version=2):
     extractor = PEFeatureExtractor(feature_version)
     features = np.array(extractor.feature_vector(file_data), dtype=np.float32)
     return lgbm_model.predict([features])[0]
+
+def extract_raw_features(inputPEs, jsonlOutputFile, label, feature_version=2):
+    """
+        Extract raw features from PE files and store into JSON file
+    """
+    extractor = PEFeatureExtractor(feature_version)
+
+    if os.path.exists(jsonlOutputFile):
+        os.remove(jsonlOutputFile)
+
+    with open(jsonlOutputFile, 'w') as outfile:
+        # files = os.listdir(data_dir)
+        for f in inputPEs:
+            fbytes = open(f, "rb").read()
+            raw_feature = extractor.raw_features(fbytes)
+            raw_feature['label'] = label
+            json.dump(raw_feature, outfile)
+            outfile.write('\n')
